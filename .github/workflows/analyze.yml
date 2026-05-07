@@ -1,0 +1,46 @@
+name: Stock Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticker:
+        description: "Stock ticker symbol (e.g. AAPL, SPY, TSLA)"
+        required: true
+        default: "AAPL"
+      model:
+        description: "Claude model ID"
+        required: false
+        default: "claude-opus-4-7"
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install yfinance pandas numpy scipy anthropic requests rich python-dotenv python-dateutil
+
+      - name: Run analysis
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          python main.py --ticker ${{ github.event.inputs.ticker }} \
+                         --model ${{ github.event.inputs.model }} \
+                         --output-dir outputs
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis-${{ github.event.inputs.ticker }}-${{ github.run_number }}
+          path: outputs/
+          retention-days: 30
