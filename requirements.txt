@@ -1,0 +1,10 @@
+yfinance>=0.2.40
+pandas>=2.1.0
+numpy>=1.26.0
+# pandas-ta>=0.3.14b  # optional: install from source if available for your Python version
+scipy>=1.11.0
+anthropic>=0.34.0
+requests>=2.31.0
+rich>=13.7.0
+python-dotenv>=1.0.0
+python-dateutil>=2.8.2
