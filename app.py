@@ -167,17 +167,21 @@ def run_full_analysis(ticker: str, model: str, status_cb):
     scenarios = build_scenarios(ind, trend, pc, sr_levels, vp, snap.current_price, snap.ohlcv)
     results["scenarios"] = scenarios
 
-    status_cb("Generating AI analysis via Claude...")
-    from ai.prompt_builder import build_analysis_payload
-    from ai.claude_client import generate_analysis
-    payload = build_analysis_payload(
-        snap=snap, ind=ind, trend=trend, sr_levels=sr_levels,
-        vp=vp, accum=accum, chain=chain, max_pain=max_pain,
-        gex=gex, iv_skew=iv_skew, expected_move=expected_move,
-        pc=pc, scenarios=scenarios, macro=macro, news=news,
-    )
-    report_text, _ = generate_analysis(payload, model=model)
-    results["report_text"] = report_text
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        status_cb("Generating AI analysis via Claude...")
+        from ai.prompt_builder import build_analysis_payload
+        from ai.claude_client import generate_analysis
+        payload = build_analysis_payload(
+            snap=snap, ind=ind, trend=trend, sr_levels=sr_levels,
+            vp=vp, accum=accum, chain=chain, max_pain=max_pain,
+            gex=gex, iv_skew=iv_skew, expected_move=expected_move,
+            pc=pc, scenarios=scenarios, macro=macro, news=news,
+        )
+        report_text, _ = generate_analysis(payload, model=model)
+        results["report_text"] = report_text
+    else:
+        status_cb("Skipping AI report (no API key)...")
+        results["report_text"] = None
 
     return results
 
@@ -862,15 +866,26 @@ def render_macro_news(r: dict):
 
 
 def render_ai_report(r: dict):
-    report_text = r.get("report_text", "")
+    report_text = r.get("report_text")
     snap = r["snap"]
 
     st.subheader(f"AI Analysis — {snap.company_name or snap.ticker}")
-    st.caption(f"Generated {datetime.now().strftime('%d %b %Y %H:%M IST')} | Powered by Claude")
 
+    if not report_text:
+        st.info(
+            "**AI report not generated** — `ANTHROPIC_API_KEY` is not set.\n\n"
+            "To enable this tab:\n"
+            "1. Get a free API key at https://console.anthropic.com\n"
+            "2. Add it to your `.env` file as `ANTHROPIC_API_KEY=sk-ant-...`\n"
+            "3. On Streamlit Cloud: go to **App settings → Secrets** and add the key there.\n\n"
+            "All other tabs (Overview, Technical, Options, Structure, Scenarios, Macro) "
+            "work fully without an API key."
+        )
+        return
+
+    st.caption(f"Generated {datetime.now().strftime('%d %b %Y %H:%M IST')} | Powered by Claude")
     st.markdown(f'<div class="report-text">{report_text}</div>', unsafe_allow_html=True)
 
-    # Download button
     st.download_button(
         label="Download Report (Markdown)",
         data=report_text,
@@ -906,7 +921,7 @@ def sidebar():
 
         api_key_ok = bool(os.environ.get("ANTHROPIC_API_KEY"))
         if not api_key_ok:
-            st.warning("ANTHROPIC_API_KEY not set. AI report will fail. Set it in your .env file.")
+            st.caption("No ANTHROPIC_API_KEY — AI Report tab will be skipped. All other tabs work.")
 
         st.divider()
         analyse_btn = st.button("Analyse", type="primary", use_container_width=True,
