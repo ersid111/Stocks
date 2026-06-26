@@ -840,8 +840,8 @@ def render_macro_news(r: dict):
             st.warning(f"Macro data unavailable: {macro.error}")
         macro_items = [
             ("Fed Funds Rate", f"{macro.fed_funds_rate:.2f}%" if macro.fed_funds_rate else "N/A"),
-            ("10Y Treasury Yield", f"{macro.treasury_10y:.2f}%" if macro.treasury_10y else "N/A"),
-            ("CPI (YoY)", f"{macro.cpi_yoy:.2f}%" if macro.cpi_yoy else "N/A"),
+            ("10Y Inflation Expectations", f"{macro.inflation_expectations_10y:.2f}%" if macro.inflation_expectations_10y else "N/A"),
+            ("Yield Curve (10Y-2Y)", f"{macro.yield_curve_10y2y:.2f}%" if macro.yield_curve_10y2y else "N/A"),
             ("VIX", fmt_num(macro.vix)),
         ]
         for k, v in macro_items:
@@ -849,7 +849,7 @@ def render_macro_news(r: dict):
 
     with col2:
         st.subheader("News Sentiment")
-        score = news.score if news else 0
+        score = news.sentiment_score if news else 0
         if score > 0.2:
             sentiment_label = ":green[Positive]"
         elif score < -0.2:
@@ -861,8 +861,8 @@ def render_macro_news(r: dict):
         st.markdown(f"**Score:** {score:.3f}" if news else "N/A")
         if news and news.summary:
             st.markdown(f"**Summary:** {news.summary}")
-        if news and news.headline_count:
-            st.markdown(f"**Headlines Analysed:** {news.headline_count}")
+        if news and news.headlines:
+            st.markdown(f"**Headlines Analysed:** {len(news.headlines)}")
 
 
 def render_ai_report(r: dict):
