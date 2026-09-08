@@ -12,3 +12,8 @@ venv/
 .coverage
 htmlcov/
 .pytest_cache/
+
+# GTF backtester artifacts
+fyers_access_token.txt
+Backtest_Report_*.xlsx
+*.log
