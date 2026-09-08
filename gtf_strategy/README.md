@@ -33,14 +33,8 @@ cells. Nothing to install locally.
 The notebook clones this repo and imports the strategy module from it, so the logic below is
 the single source of truth — it is not duplicated inside the notebook.
 
-**Two differences from running locally:**
-
-- **The login flow is manual.** Colab has no browser on the VM, so `generate_token.py` cannot
-  be used there. The notebook prints a login link instead; you open it, log in, and paste the
-  resulting `http://127.0.0.1/...auth_code=...` URL back into the next cell. The
-  "site can't be reached" page you land on is expected.
-- **The token does not survive a disconnect.** Colab wipes the VM, taking
-  `fyers_access_token.txt` with it. After a reconnect, re-run the notebook from the top.
+With the default `yfinance` source there is **nothing to log in to** — open the notebook, pick
+your symbols and dates, and run. If the runtime disconnects, just re-run from the top.
 
 ## How the strategy works
 
@@ -80,39 +74,50 @@ the single source of truth — it is not duplicated inside the notebook.
    - A short that somehow survives to the next day is closed at that day's open as
      `OVERNIGHT_SHORT_FAIL`.
 
+## Data sources
+
+The backtester only needs candles, so it does not care where they come from. Pick one with
+`DATA_PROVIDER` at the top of `gtf_strategy_automation.py`:
+
+| `DATA_PROVIDER` | Account needed | Network | Notes |
+| --- | --- | --- | --- |
+| `"yfinance"` *(default)* | none | yes | Yahoo Finance. Just works. NSE symbols get `.NS` added for you. |
+| `"csv"` | none | **no** | Your own files. Works fully offline. |
+| `"fyers"` | Fyers account + token | yes | The original path. See the optional section below. |
+
+Whichever you choose, the strategy receives the same thing: a UTC-indexed OHLCV frame with
+prices adjusted for splits, sorted and de-duplicated.
+
+### Know the limits of free Yahoo intraday data
+
+This is the one thing that will bite you. Yahoo caps how far back intraday history goes:
+
+| Interval | History available |
+| --- | --- |
+| `5m`, `15m`, `30m` | **last ~60 days only** |
+| `60m` | last ~730 days |
+| `1d` | many years |
+
+The default `15m` entry timeframe therefore **cannot backtest a period more than about two
+months old**. Ask for one anyway and you get a printed warning plus an empty result, not a
+crash. For older or longer studies, either move to `60m`/`1d`, or use the `csv` provider with
+data you supply. Yahoo data is also unofficial and occasionally has bad prints — spot-check
+anything surprising before you act on it.
+
 ## Installation & setup
 
-### 1. Install Python and dependencies
+### 1. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-(That installs `pandas`, `numpy`, `fyers-apiv3`, `openpyxl`, `pytz` and `tabulate`.)
+That is `pandas`, `numpy`, `yfinance`, `openpyxl`, `pytz` and `tabulate`. No broker SDK.
 
-### 2. API configuration (crucial step)
+### 2. Create the stock list
 
-You need a valid Fyers API account.
-
-- **Client ID:** set `CLIENT_ID` in **both** `generate_token.py` and
-  `gtf_strategy_automation.py` to your actual Fyers Client ID (e.g. `ABCDEFG-101`).
-- **Secret key:** set `SECRET_KEY` in `generate_token.py`.
-- **Access token:** the backtester *reads* a token, it does not generate one. Run the
-  token generator first:
-
-```bash
-python generate_token.py
-```
-
-This opens the Fyers login page — log in quickly, or the page expires. You will be
-redirected to a "page not found" at `http://127.0.0.1`, which is normal; copy the full
-URL from the address bar and paste it back into the terminal. The token is saved to
-`fyers_access_token.txt` in the same folder.
-
-### 3. Create the stock list
-
-Edit `stock_list.txt` and put one NSE symbol per line — plain symbols, no `.NS` suffix.
-Lines starting with `#` are ignored.
+Edit `stock_list.txt` and put one NSE symbol per line — plain symbols, no `.NS` suffix
+(the yfinance provider adds it). Lines starting with `#` are ignored.
 
 ```
 HDFCBANK
@@ -120,12 +125,15 @@ RELIANCE
 SBIN
 ```
 
-### 4. Adjust settings
+Indices work too, written the way Yahoo names them (`^NSEI` for Nifty 50).
+
+### 3. Adjust settings
 
 All parameters live in Section 1 of `gtf_strategy_automation.py`:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
+| `DATA_PROVIDER` | `"yfinance"` | Where candles come from |
 | `START_DATE` / `END_DATE` | `2025-09-01` / `2025-09-30` | Backtest window |
 | `HTF_INTERVAL` | `60m` | Higher timeframe for the zone map |
 | `LTF_INTERVAL` | `15m` | Entry timeframe |
@@ -145,11 +153,44 @@ Supported intervals: `5m`, `15m`, `30m`, `60m`, `1d`, `1mo`.
 Note the warmup: the loop only starts after `EMA_TP_PERIOD + ATR_LOOKBACK + 2` bars
 (216 by default), so a short date range on a slow timeframe will produce no trades.
 
-### 5. Run it
+### 4. Run it
 
 ```bash
 python gtf_strategy_automation.py
 ```
+
+## Using your own data (`csv`)
+
+Set `DATA_PROVIDER = "csv"` and drop files into `csv_data/` (or point `CSV_DIR` elsewhere),
+named `<TICKER>_<interval>.csv` — so `RELIANCE_15m.csv` and `RELIANCE_60m.csv` for the
+default timeframes. Each file needs a date column (`Date`, `Datetime`, `Timestamp` or `Time`)
+plus `Open,High,Low,Close,Volume`:
+
+```csv
+Date,Open,High,Low,Close,Volume
+2025-09-01 09:15:00,1372.5,1378.0,1370.1,1376.4,184320
+2025-09-01 09:30:00,1376.4,1381.2,1374.8,1379.9,151204
+```
+
+Timestamps without a timezone are read as IST, which is what an NSE export gives you.
+This path touches no network at all.
+
+## Optional: using Fyers instead
+
+Only if you want it. Set `DATA_PROVIDER = "fyers"`, then:
+
+```bash
+pip install fyers-apiv3
+```
+
+- Set `CLIENT_ID` in **both** `generate_token.py` and `gtf_strategy_automation.py`, and
+  `SECRET_KEY` in `generate_token.py`.
+- Run `python generate_token.py`. It opens the Fyers login page — log in quickly, or it
+  expires. You will be redirected to a "page not found" at `http://127.0.0.1`, which is
+  normal; copy the full URL from the address bar and paste it back into the terminal. The
+  token is saved to `fyers_access_token.txt`.
+
+Tokens last for the trading day. Nothing else in the strategy changes.
 
 ## Output
 
@@ -165,9 +206,21 @@ same folder, with two sheets:
 
 | Message | Cause |
 | --- | --- |
-| `'fyers_access_token.txt' not found` | You didn't run `generate_token.py`, or the file is named differently / in another folder. |
-| `Fyers API Login Failed` | Token expired. Delete `fyers_access_token.txt` and run `generate_token.py` again. |
-| `Interval ... not supported` | Use one of `5m`, `15m`, `30m`, `60m`, `1d`, `1mo`. |
-| `Not enough LTF data bars available` | The date range is too short for the 216-bar indicator warmup. Widen it or lower `EMA_TP_PERIOD`. |
-| Empty report | `stock_list.txt` is empty, or the market was closed across the chosen dates. |
+| `no LTF data for ... skipping` | Most often the Yahoo intraday limit: `15m` only goes back ~60 days. Use a recent range, a bigger interval, or the `csv` provider. |
+| `WARNING: Yahoo serves at most ~60 days...` | Exactly that — your `START_DATE` is too far back for the interval. |
+| `Interval ... not supported` | Use `5m`, `15m`, `30m`, `60m`, `1d` or `1mo`. |
+| `Not enough LTF data bars available` | The range is shorter than the 216-bar warmup. Widen the dates or lower `EMA_TP_PERIOD`. |
+| `yfinance is not installed` | `pip install yfinance`. |
+| `CSV not found: ...` | The `csv` provider expects `<CSV_DIR>/<TICKER>_<interval>.csv`, e.g. `csv_data/RELIANCE_15m.csv`. |
+| `no date column found` | Your CSV needs a `Date`, `Datetime`, `Timestamp` or `Time` column. |
+| `Unknown provider '...'` | `DATA_PROVIDER` must be `yfinance`, `csv` or `fyers`. |
+| Backtest completes but zero trades | Normal with strict filters. Try a longer window, a lower `MIN_TRADE_SCORE` or `MIN_WICK_TO_RANGE_RATIO`, or `MAX_ZONE_WIDTH_ATR_MULTIPLE = 999`. |
 | `FATAL ERROR SAVING EXCEL` | `pip install openpyxl`. |
+| `'fyers_access_token.txt' not found` / `Fyers API Login Failed` | Fyers path only. Re-run `generate_token.py`; tokens last one trading day. |
+
+## Known limitations
+
+Before you trade off these numbers, read the caveats — the backtest does **not** model
+transaction costs or slippage, assumes stops fill exactly at the stop price, resets capital
+per symbol, and builds its higher-timeframe zone map over the full history up front. See the
+project discussion for the full list.

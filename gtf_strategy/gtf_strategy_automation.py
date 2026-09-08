@@ -25,7 +25,14 @@ Core idea
    force-closes same-day shorts at the cutoff, and never carries a short
    overnight.
 
-Setup: see README.md in this folder. Run `generate_token.py` first.
+Data source
+-----------
+Set ``DATA_PROVIDER`` below. The default is ``yfinance``, which needs no broker
+account, no API key and no token. ``csv`` reads local files and touches no
+network at all. ``fyers`` uses the Fyers API and requires an access token from
+``generate_token.py``.
+
+Setup: see README.md in this folder.
 
 Usage:
     python gtf_strategy_automation.py
@@ -43,9 +50,11 @@ import numpy as np
 import pandas as pd
 import pytz
 
-try:  # the API client is only needed to actually fetch data
+from data_providers import fetch_ohlcv
+
+try:  # only needed if DATA_PROVIDER is "fyers"
     from fyers_apiv3 import fyersModel
-except ImportError:  # pragma: no cover - allows importing the strategy helpers
+except ImportError:  # pragma: no cover - the default provider needs no API client
     fyersModel = None
 
 # =========================================================================
@@ -58,7 +67,14 @@ REPORT_FILE = f"Backtest_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 START_DATE = "2025-09-01"
 END_DATE = "2025-09-30"
 
-# === FYERS API CREDENTIALS ===
+# === DATA SOURCE ===
+# "yfinance" - Yahoo Finance, no account or key needed (default)
+# "csv"      - local files at CSV_DIR/<TICKER>_<interval>.csv, no network
+# "fyers"    - Fyers API, needs an access token from generate_token.py
+DATA_PROVIDER = "yfinance"
+CSV_DIR = "csv_data"
+
+# === FYERS API CREDENTIALS (only used when DATA_PROVIDER == "fyers") ===
 CLIENT_ID = "AAAA1AAAAA-999"  # Use your actual Client ID
 TOKEN_FILE = "fyers_access_token.txt"
 
@@ -169,52 +185,21 @@ class Location(Enum):
 # =========================================================================
 
 
-def get_fyers_data(fyers_model, ticker_symbol, interval, start_date, end_date):
-    """Fetch historical candles from Fyers and return them as a DataFrame."""
-    # stock_list.txt holds plain NSE symbols ("HDFCBANK"), not "HDFCBANK.NS"
-    fyers_symbol = f"NSE:{ticker_symbol}-EQ"
+def get_data(ticker_symbol, interval, start_date, end_date, provider=None, fyers_model=None):
+    """Fetch candles for one symbol from the configured provider.
 
-    interval_mapper = {
-        "5m": "5",
-        "15m": "15",
-        "30m": "30",
-        "60m": "60",
-        "1d": "D",
-        "1mo": "M",
-    }
+    Returns a UTC-indexed OHLCV frame, or an empty frame if the source had
+    nothing for this symbol and range.
+    """
+    provider = provider or DATA_PROVIDER
+    kwargs = {}
+    if provider == "fyers":
+        kwargs["fyers_model"] = fyers_model or fyers
+    elif provider == "csv":
+        kwargs["csv_dir"] = CSV_DIR
 
-    if interval not in interval_mapper:
-        print(f"Interval {interval} not supported by this script.")
-        return pd.DataFrame()
-
-    fyers_resolution = interval_mapper[interval]
-
-    data = {
-        "symbol": fyers_symbol,
-        "resolution": fyers_resolution,
-        "date_format": "1",  # YYYY-MM-DD
-        "range_from": start_date,
-        "range_to": end_date,
-        "cont_flag": "1",
-    }
-
-    try:
-        response = fyers_model.history(data=data)
-    except Exception as e:
-        print(f"Error fetching Fyers data for {ticker_symbol}: {e}")
-        return pd.DataFrame()
-
-    if response.get("code") != 200 or not response.get("candles"):
-        print(f"Fyers API Error for {ticker_symbol} ({fyers_symbol}): "
-              f"{response.get('message', 'No candles data')}")
-        return pd.DataFrame()
-
-    df = pd.DataFrame(response["candles"])
-    df.rename(columns={0: "Date", 1: "Open", 2: "High", 3: "Low", 4: "Close", 5: "Volume"},
-              inplace=True)
-    df["Date"] = pd.to_datetime(df["Date"], unit="s", utc=True)
-    df.set_index("Date", inplace=True)
-    return df
+    return fetch_ohlcv(ticker_symbol, interval, start_date, end_date,
+                       provider=provider, **kwargs)
 
 
 def _scalar(value):
@@ -500,9 +485,9 @@ def initialize_fyers():
     return None
 
 
-def run_backtest(ticker, start_date, end_date, fyers_model=None):
+def run_backtest(ticker, start_date, end_date, provider=None, fyers_model=None):
     """Run the GTF backtest for a single symbol. Returns a summary dict or None."""
-    fyers_model = fyers_model or fyers
+    provider = provider or DATA_PROVIDER
 
     current_capital = INITIAL_CAPITAL
     trade_id_counter = 0
@@ -512,15 +497,17 @@ def run_backtest(ticker, start_date, end_date, fyers_model=None):
     pending_trades = []
 
     print(f"\n--- Starting GTF Backtest for {ticker} "
-          f"(HTF: {HTF_INTERVAL}, LTF: {LTF_INTERVAL}) ---")
+          f"(HTF: {HTF_INTERVAL}, LTF: {LTF_INTERVAL}, source: {provider}) ---")
 
     # --- 1. DATA FETCHING ---
-    ltf_data = get_fyers_data(fyers_model, ticker, LTF_INTERVAL, start_date, end_date)
-    htf_data = get_fyers_data(fyers_model, ticker, HTF_INTERVAL, start_date, end_date)
+    ltf_data = get_data(ticker, LTF_INTERVAL, start_date, end_date, provider, fyers_model)
+    htf_data = get_data(ticker, HTF_INTERVAL, start_date, end_date, provider, fyers_model)
     start_dt = pd.to_datetime(start_date).date()
 
     if ltf_data.empty or htf_data.empty:
-        print("Error: Could not fetch enough data for both timeframes.")
+        missing = " and ".join(
+            [n for n, d in (("LTF", ltf_data), ("HTF", htf_data)) if d.empty])
+        print(f"Error: no {missing} data for {ticker} \u2014 skipping.")
         return None
 
     # --- 2. HTF ZONE PRE-CALCULATION ---
@@ -833,11 +820,14 @@ def execute_multi_backtest():
         print(f"ERROR: no symbols to test. Add NSE symbols to {STOCK_LIST_FILE}.")
         return
 
-    if initialize_fyers() is None:
-        return
+    if DATA_PROVIDER == "fyers":
+        if initialize_fyers() is None:
+            return
+    else:
+        print(f"Data source: {DATA_PROVIDER} (no broker account or token needed)")
 
     print(f"\n--- Starting Multi-Asset Backtest on {len(tickers)} Symbols "
-          f"(HTF: {HTF_INTERVAL}, LTF: {LTF_INTERVAL}) ---")
+          f"(HTF: {HTF_INTERVAL}, LTF: {LTF_INTERVAL}, source: {DATA_PROVIDER}) ---")
 
     for ticker in tickers:
         result = run_backtest(ticker, START_DATE, END_DATE)

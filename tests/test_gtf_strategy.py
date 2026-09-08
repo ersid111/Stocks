@@ -3,12 +3,14 @@
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gtf_strategy"))
 
 import gtf_strategy_automation as gtf  # noqa: E402
+import data_providers as dp  # noqa: E402
 
 
 def candle(o, h, l, c):
@@ -221,7 +223,7 @@ def test_load_tickers_missing_file_returns_empty(tmp_path):
     assert gtf.load_tickers(str(tmp_path / "nope.txt")) == []
 
 
-# ── data fetching ────────────────────────────────────────────────────────
+# ── data providers ───────────────────────────────────────────────────────
 
 
 class FakeFyers:
@@ -234,23 +236,300 @@ class FakeFyers:
         return self.response
 
 
-def test_get_fyers_data_builds_symbol_and_dataframe():
+def test_fyers_provider_builds_symbol_and_dataframe():
     fake = FakeFyers({"code": 200, "candles": [[1735689600, 100, 105, 99, 104, 5000]]})
-    df = gtf.get_fyers_data(fake, "HDFCBANK", "15m", "2025-09-01", "2025-09-30")
+    df = gtf.get_data("HDFCBANK", "15m", "2025-09-01", "2025-09-30",
+                      provider="fyers", fyers_model=fake)
 
     assert fake.last_request["symbol"] == "NSE:HDFCBANK-EQ"
     assert fake.last_request["resolution"] == "15"
     assert list(df.columns) == ["Open", "High", "Low", "Close", "Volume"]
     assert df.index.name == "Date"
+    assert str(df.index.tz) == "UTC"
     assert len(df) == 1
 
 
-def test_get_fyers_data_rejects_unsupported_interval():
+def test_fyers_provider_rejects_unsupported_interval():
     fake = FakeFyers({"code": 200, "candles": []})
-    assert gtf.get_fyers_data(fake, "HDFCBANK", "3m", "2025-09-01", "2025-09-30").empty
+    df = gtf.get_data("HDFCBANK", "3m", "2025-09-01", "2025-09-30",
+                      provider="fyers", fyers_model=fake)
+    assert df.empty
     assert fake.last_request is None
 
 
-def test_get_fyers_data_handles_api_error():
+def test_fyers_provider_handles_api_error():
     fake = FakeFyers({"code": 401, "message": "invalid token"})
-    assert gtf.get_fyers_data(fake, "HDFCBANK", "15m", "2025-09-01", "2025-09-30").empty
+    df = gtf.get_data("HDFCBANK", "15m", "2025-09-01", "2025-09-30",
+                      provider="fyers", fyers_model=fake)
+    assert df.empty
+
+
+def test_fyers_provider_without_client_is_an_error():
+    with pytest.raises(dp.DataProviderError):
+        dp.fetch_ohlcv("HDFCBANK", "15m", "2025-09-01", "2025-09-30", provider="fyers")
+
+
+def test_unknown_provider_is_an_error():
+    with pytest.raises(dp.DataProviderError):
+        dp.fetch_ohlcv("HDFCBANK", "15m", "2025-09-01", "2025-09-30", provider="quandl")
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("RELIANCE", "RELIANCE.NS"),
+    ("reliance", "RELIANCE.NS"),
+    ("  SBIN  ", "SBIN.NS"),
+    ("RELIANCE.NS", "RELIANCE.NS"),   # already suffixed
+    ("^NSEI", "^NSEI"),               # index, left alone
+    ("AAPL.O", "AAPL.O"),             # explicit non-NSE suffix
+])
+def test_nse_symbol_mapping(raw, expected):
+    assert dp._to_nse_symbol(raw) == expected
+
+
+# ── normalisation (what every provider is funnelled through) ─────────────
+
+
+def raw_frame(index, **overrides):
+    data = {"Open": [1.0], "High": [2.0], "Low": [0.5], "Close": [1.5], "Volume": [100]}
+    data.update(overrides)
+    return pd.DataFrame(data, index=pd.DatetimeIndex(index, name="Date"))
+
+
+def test_normalise_localises_a_naive_index_as_exchange_time():
+    # A naive 09:15 from an NSE feed is 09:15 IST = 03:45 UTC, not 09:15 UTC
+    df = dp._normalise(raw_frame(["2025-09-01 09:15:00"]), "test")
+    assert str(df.index.tz) == "UTC"
+    assert df.index[0] == pd.Timestamp("2025-09-01 03:45:00", tz="UTC")
+
+
+def test_normalise_converts_an_aware_index_to_utc():
+    idx = pd.DatetimeIndex(["2025-09-01 09:15:00"]).tz_localize("Asia/Kolkata")
+    df = dp._normalise(raw_frame(idx), "test")
+    assert df.index[0] == pd.Timestamp("2025-09-01 03:45:00", tz="UTC")
+
+
+def test_normalise_flattens_multiindex_columns():
+    # yfinance hands back ("Close", "RELIANCE.NS") style columns
+    df = raw_frame(["2025-09-01 09:15:00"])
+    df.columns = pd.MultiIndex.from_product([df.columns, ["RELIANCE.NS"]])
+    out = dp._normalise(df, "test")
+    assert list(out.columns) == ["Open", "High", "Low", "Close", "Volume"]
+
+
+def test_normalise_drops_adj_close_and_keeps_canonical_order():
+    df = raw_frame(["2025-09-01 09:15:00"])
+    df["Adj Close"] = 1.45
+    out = dp._normalise(df[["Adj Close", "Volume", "Close", "Low", "High", "Open"]], "test")
+    assert list(out.columns) == ["Open", "High", "Low", "Close", "Volume"]
+
+
+def test_normalise_raises_when_a_price_column_is_missing():
+    df = raw_frame(["2025-09-01 09:15:00"]).drop(columns=["Low"])
+    with pytest.raises(dp.DataProviderError):
+        dp._normalise(df, "test")
+
+
+def test_normalise_sorts_and_deduplicates():
+    idx = ["2025-09-02 09:15:00", "2025-09-01 09:15:00", "2025-09-01 09:15:00"]
+    df = pd.DataFrame({"Open": [3.0, 1.0, 9.0], "High": [3.0, 1.0, 9.0],
+                       "Low": [3.0, 1.0, 9.0], "Close": [3.0, 1.0, 9.0],
+                       "Volume": [1, 2, 3]}, index=pd.DatetimeIndex(idx))
+    out = dp._normalise(df, "test")
+    assert len(out) == 2
+    assert out.index.is_monotonic_increasing
+    assert out["Open"].iloc[0] == 1.0   # first of the duplicate pair kept
+
+
+def test_normalise_empty_frame_returns_canonical_empty():
+    out = dp._normalise(pd.DataFrame(), "test")
+    assert out.empty
+    assert list(out.columns) == ["Open", "High", "Low", "Close", "Volume"]
+
+
+# ── csv provider (works with no network at all) ──────────────────────────
+
+
+def write_csv(tmp_path, name, rows, date_header="Date"):
+    p = tmp_path / name
+    lines = [f"{date_header},Open,High,Low,Close,Volume"]
+    lines += [f"{d},{o},{h},{l},{c},{v}" for d, o, h, l, c, v in rows]
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+def test_csv_provider_reads_and_filters_by_date(tmp_path):
+    write_csv(tmp_path, "SBIN_15m.csv", [
+        ("2025-08-30 09:15:00", 100, 101, 99, 100.5, 1000),   # before range
+        ("2025-09-01 09:15:00", 101, 102, 100, 101.5, 1200),
+        ("2025-09-30 15:15:00", 105, 106, 104, 105.5, 1300),
+        ("2025-10-02 09:15:00", 110, 111, 109, 110.5, 1400),  # after range
+    ])
+    df = dp.fetch_ohlcv("SBIN", "15m", "2025-09-01", "2025-09-30",
+                        provider="csv", csv_dir=str(tmp_path))
+    assert len(df) == 2
+    assert str(df.index.tz) == "UTC"
+    assert df["Close"].tolist() == [101.5, 105.5]
+
+
+def test_csv_provider_accepts_alternative_date_headers(tmp_path):
+    write_csv(tmp_path, "SBIN_15m.csv",
+              [("2025-09-01 09:15:00", 1, 2, 0.5, 1.5, 10)], date_header="timestamp")
+    df = dp.fetch_ohlcv("SBIN", "15m", "2025-09-01", "2025-09-30",
+                        provider="csv", csv_dir=str(tmp_path))
+    assert len(df) == 1
+
+
+def test_csv_provider_missing_file_returns_empty(tmp_path):
+    df = dp.fetch_ohlcv("NOPE", "15m", "2025-09-01", "2025-09-30",
+                        provider="csv", csv_dir=str(tmp_path))
+    assert df.empty
+
+
+def test_csv_provider_without_a_date_column_is_an_error(tmp_path):
+    (tmp_path / "SBIN_15m.csv").write_text("Open,High,Low,Close,Volume\n1,2,0.5,1.5,10\n")
+    with pytest.raises(dp.DataProviderError):
+        dp.fetch_ohlcv("SBIN", "15m", "2025-09-01", "2025-09-30",
+                       provider="csv", csv_dir=str(tmp_path))
+
+
+# ── end-to-end through the strategy, no network ──────────────────────────
+
+
+def test_backtest_runs_end_to_end_on_csv_data(tmp_path, monkeypatch):
+    """A full run with the csv provider: no broker, no API, no network."""
+    rng = np.random.default_rng(11)
+
+    def series(n, freq, fname):
+        start = pd.Timestamp("2025-09-01 09:15:00")
+        idx = pd.date_range(start, periods=n, freq=freq)
+        price, rows = 1000.0, []
+        for ts in idx:
+            o = price
+            c = max(1.0, o + rng.normal(0, 6))
+            h, l = max(o, c) + abs(rng.normal(0, 3)), min(o, c) - abs(rng.normal(0, 3))
+            rows.append((ts.strftime("%Y-%m-%d %H:%M:%S"), round(o, 2), round(h, 2),
+                         round(l, 2), round(c, 2), 10000))
+            price = c
+        write_csv(tmp_path, fname, rows)
+
+    series(700, "15min", "TESTSTK_15m.csv")
+    series(180, "60min", "TESTSTK_60m.csv")
+
+    monkeypatch.setattr(gtf, "DATA_PROVIDER", "csv")
+    monkeypatch.setattr(gtf, "CSV_DIR", str(tmp_path))
+    monkeypatch.setattr(gtf, "EMA_TP_PERIOD", 50)
+
+    result = gtf.run_backtest("TESTSTK", "2025-09-01", "2025-12-31")
+
+    assert result is not None
+    assert result["Status"] == "COMPLETED"
+    assert result["Total Trades"] >= 0
+    assert result["Final Capital"] == pytest.approx(
+        gtf.INITIAL_CAPITAL + result["Total P&L"])
+
+
+def test_backtest_returns_none_when_the_source_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(gtf, "DATA_PROVIDER", "csv")
+    monkeypatch.setattr(gtf, "CSV_DIR", str(tmp_path))
+    assert gtf.run_backtest("MISSING", "2025-09-01", "2025-09-30") is None
+
+
+# ── yfinance provider (mocked — the sandbox cannot reach Yahoo) ───────────
+
+
+class FakeYFTicker:
+    """Stands in for yfinance.Ticker, recording how history() was called."""
+
+    calls = []
+
+    def __init__(self, symbol):
+        self.symbol = symbol
+
+    def history(self, **kwargs):
+        FakeYFTicker.calls.append({"symbol": self.symbol, **kwargs})
+        idx = pd.DatetimeIndex(
+            ["2025-09-01 09:15:00", "2025-09-01 09:30:00"]
+        ).tz_localize("Asia/Kolkata")
+        # Yahoo returns Dividends/Stock Splits alongside the price columns
+        return pd.DataFrame({
+            "Open": [100.0, 101.0], "High": [102.0, 103.0],
+            "Low": [99.0, 100.0], "Close": [101.0, 102.0],
+            "Volume": [5000, 6000], "Dividends": [0.0, 0.0], "Stock Splits": [0.0, 0.0],
+        }, index=idx)
+
+
+@pytest.fixture
+def fake_yf(monkeypatch):
+    FakeYFTicker.calls = []
+    module = type(sys)("yfinance")
+    module.Ticker = FakeYFTicker
+    monkeypatch.setitem(sys.modules, "yfinance", module)
+    return FakeYFTicker
+
+
+def test_yfinance_provider_normalises_the_response(fake_yf):
+    df = dp.fetch_ohlcv("RELIANCE", "15m", "2025-09-01", "2025-09-30")
+
+    assert list(df.columns) == ["Open", "High", "Low", "Close", "Volume"]  # extras dropped
+    assert str(df.index.tz) == "UTC"
+    assert df.index[0] == pd.Timestamp("2025-09-01 03:45:00", tz="UTC")  # 09:15 IST
+    assert df["Close"].tolist() == [101.0, 102.0]
+
+
+def test_yfinance_provider_appends_the_nse_suffix(fake_yf):
+    dp.fetch_ohlcv("RELIANCE", "15m", "2025-09-01", "2025-09-30")
+    assert fake_yf.calls[0]["symbol"] == "RELIANCE.NS"
+
+
+def test_yfinance_provider_maps_60m_to_yahoos_1h(fake_yf):
+    dp.fetch_ohlcv("RELIANCE", "60m", "2025-09-01", "2025-09-30")
+    assert fake_yf.calls[0]["interval"] == "1h"
+
+
+def test_yfinance_provider_makes_the_end_date_inclusive(fake_yf):
+    # Yahoo's `end` is exclusive, so END_DATE itself would be dropped without this
+    dp.fetch_ohlcv("RELIANCE", "15m", "2025-09-01", "2025-09-30")
+    assert fake_yf.calls[0]["end"] == "2025-10-01"
+
+
+def test_yfinance_provider_requests_adjusted_prices(fake_yf):
+    # Unadjusted history puts fake gaps at splits, which would forge zones
+    dp.fetch_ohlcv("RELIANCE", "1d", "2025-09-01", "2025-09-30")
+    assert fake_yf.calls[0]["auto_adjust"] is True
+
+
+def test_yfinance_provider_rejects_unsupported_interval(fake_yf):
+    assert dp.fetch_ohlcv("RELIANCE", "2m", "2025-09-01", "2025-09-30").empty
+    assert fake_yf.calls == []
+
+
+def test_yfinance_provider_retries_then_gives_up_on_empty(monkeypatch):
+    attempts = []
+
+    class Empty:
+        def __init__(self, symbol):
+            pass
+
+        def history(self, **kw):
+            attempts.append(1)
+            return pd.DataFrame()
+
+    module = type(sys)("yfinance")
+    module.Ticker = Empty
+    monkeypatch.setitem(sys.modules, "yfinance", module)
+    monkeypatch.setattr(dp.time, "sleep", lambda s: None)
+
+    df = dp.fetch_ohlcv("RELIANCE", "15m", "2025-09-01", "2025-09-30")
+    assert df.empty
+    assert len(attempts) == 3          # initial try plus two retries
+
+
+def test_yfinance_provider_warns_past_the_intraday_history_limit(fake_yf, capsys):
+    # Yahoo serves ~60 days of 15m data; asking for 2015 should say so, not fail silently
+    dp.fetch_ohlcv("RELIANCE", "15m", "2015-01-01", "2015-01-31")
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_yfinance_is_the_default_provider(fake_yf):
+    dp.fetch_ohlcv("RELIANCE", "15m", "2025-09-01", "2025-09-30")
+    assert len(fake_yf.calls) == 1     # reached yfinance without naming it

@@ -2,7 +2,9 @@
 Fyers Access Token Generator
 ============================
 
-Run this FIRST, before running gtf_strategy_automation.py.
+OPTIONAL. Only needed if you set DATA_PROVIDER = "fyers" in
+gtf_strategy_automation.py. The default provider (yfinance) needs no account,
+no API key and no token, so most people can ignore this file entirely.
 
 It opens the Fyers login page in your browser, takes the redirect URL you get
 back, exchanges the auth_code for an access token, and saves that token to
