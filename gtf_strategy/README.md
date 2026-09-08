@@ -16,6 +16,32 @@ historical data and do not guarantee future performance.
 - **API usage:** this script uses the Fyers API. You are responsible for your own API credentials and for complying with Fyers' terms of service.
 - **Algorithmic trading:** automated trading carries significant risk. Always test thoroughly in a paper-trading environment first.
 
+## Run it on Google Colab (no local install)
+
+[`GTF_Strategy_Colab.ipynb`](GTF_Strategy_Colab.ipynb) runs the whole backtest in the
+browser — dependencies, Fyers login, parameters, results and charts, all as form-driven
+cells. Nothing to install locally.
+
+**To open it:**
+
+- In Colab, go to **File → Open notebook → GitHub**, paste this repository's URL, pick the
+  branch, and choose `gtf_strategy/GTF_Strategy_Colab.ipynb`; or
+- download the `.ipynb` and use **File → Upload notebook**; or
+- once this is merged to `main`:
+  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ersid111/Stocks/blob/main/gtf_strategy/GTF_Strategy_Colab.ipynb)
+
+The notebook clones this repo and imports the strategy module from it, so the logic below is
+the single source of truth — it is not duplicated inside the notebook.
+
+**Two differences from running locally:**
+
+- **The login flow is manual.** Colab has no browser on the VM, so `generate_token.py` cannot
+  be used there. The notebook prints a login link instead; you open it, log in, and paste the
+  resulting `http://127.0.0.1/...auth_code=...` URL back into the next cell. The
+  "site can't be reached" page you land on is expected.
+- **The token does not survive a disconnect.** Colab wipes the VM, taking
+  `fyers_access_token.txt` with it. After a reconnect, re-run the notebook from the top.
+
 ## How the strategy works
 
 1. **HTF zone map (default 60m).** A strong leg-in candle, 1-3 small-bodied *base*
