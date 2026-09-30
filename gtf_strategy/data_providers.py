@@ -17,6 +17,7 @@ UTC ``Date``, with float ``Open/High/Low/Close/Volume`` columns, sorted ascendin
 and de-duplicated — so the strategy code never has to care about the source.
 """
 
+import logging
 import os
 import time
 
@@ -105,6 +106,11 @@ def _fetch_yfinance(ticker, interval, start_date, end_date, retries=2):
     except ImportError:
         raise DataProviderError(
             "yfinance is not installed. Run: pip install yfinance") from None
+
+    # yfinance narrates every internal retry ("cookie fetch failed",
+    # "possibly delisted"), which buries our own diagnostics. We report the
+    # outcome ourselves below.
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
     if interval not in YF_INTERVALS:
         print(f"  Interval '{interval}' is not supported by the yfinance provider.")

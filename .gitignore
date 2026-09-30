@@ -17,3 +17,4 @@ htmlcov/
 fyers_access_token.txt
 Backtest_Report_*.xlsx
 *.log
+csv_data/

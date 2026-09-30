@@ -43,7 +43,7 @@ backtest results do not guarantee future performance.
 
 import math
 import os
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 from enum import Enum
 
 import numpy as np
@@ -64,8 +64,11 @@ except ImportError:  # pragma: no cover - the default provider needs no API clie
 # --- CONFIGURATION ---
 STOCK_LIST_FILE = "stock_list.txt"
 REPORT_FILE = f"Backtest_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-START_DATE = "2025-09-01"
-END_DATE = "2025-09-30"
+# Default to a rolling recent window. Yahoo only serves ~60 days of 15m
+# history, so fixed dates go stale and silently return nothing. Override with
+# explicit "YYYY-MM-DD" strings for a specific study.
+END_DATE = date.today().isoformat()
+START_DATE = (date.today() - timedelta(days=55)).isoformat()
 
 # === DATA SOURCE ===
 # "yfinance" - Yahoo Finance, no account or key needed (default)
